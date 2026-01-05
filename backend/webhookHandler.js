@@ -8,25 +8,71 @@ const { processWithIdempotency } = require('../services/idempotency-service/idem
 
 const { WHATSAPP_MESSAGE_MAX_LENGTH } = whatsappService;
 
-const { getEnvVar } = require('../services/utils/envHelper');
+// Load webhook verification token directly from environment
+const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 
-// Support both old and new variable names for backward compatibility
-const VERIFY_TOKEN = getEnvVar('WEBHOOK_VERIFY_TOKEN', 'VERIFY_TOKEN');
+// Common placeholder values that should be rejected
+const PLACEHOLDER_VALUES = [
+  'your_webhook_verify_token_here',
+  'your webhook verify token here',
+  'WEBHOOK_VERIFY_TOKEN',
+  'VERIFY_TOKEN',
+  'placeholder',
+  'changeme',
+  'replace_me',
+];
+
+// Validate token at module load time - fail fast if missing or placeholder
+const normalizedToken = VERIFY_TOKEN ? VERIFY_TOKEN.trim() : '';
+if (!normalizedToken) {
+  const error = new Error('WEBHOOK_VERIFY_TOKEN environment variable is required but not set or empty');
+  console.error('❌ ERROR: WEBHOOK_VERIFY_TOKEN environment variable is required but not set.');
+  console.error('   Please set WEBHOOK_VERIFY_TOKEN in your .env file or environment variables.');
+  console.error('   This token is used for WhatsApp webhook verification.');
+  throw error;
+}
+
+if (PLACEHOLDER_VALUES.some(placeholder => normalizedToken.toLowerCase() === placeholder.toLowerCase())) {
+  const error = new Error(`WEBHOOK_VERIFY_TOKEN appears to be a placeholder value: "${VERIFY_TOKEN}"`);
+  console.error(`❌ ERROR: WEBHOOK_VERIFY_TOKEN appears to be a placeholder value: "${VERIFY_TOKEN}"`);
+  console.error('   Please set WEBHOOK_VERIFY_TOKEN to your actual webhook verification token.');
+  console.error('   This token must match the value configured in Meta\'s WhatsApp Business API settings.');
+  throw error;
+}
+
+// Store the validated token (use the normalized version to ensure consistency)
+const VALIDATED_VERIFY_TOKEN = normalizedToken;
 
 /**
  * Handle WhatsApp webhook verification
  */
 async function verify(req, res) {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    // Debug logging for webhook verification
     const logger = createLogger();
-    logger.info('Webhook verified successfully');
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
+    logger.debug('Webhook verification attempt', {
+      mode: mode || '(not provided)',
+      incoming_hub_verify_token: token || '(not provided)',
+      expected_verify_token: VALIDATED_VERIFY_TOKEN,
+    });
+
+    // Verify: hub.mode === 'subscribe' AND hub.verify_token === VALIDATED_VERIFY_TOKEN
+    if (mode === 'subscribe' && token === VALIDATED_VERIFY_TOKEN) {
+      logger.info('Webhook verified successfully');
+      return res.status(200).send(challenge);
+    } else {
+      return res.sendStatus(403);
+    }
+  } catch (error) {
+    const logger = createLogger();
+    logger.error('Error in webhook verification', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
   }
 }
 
@@ -87,6 +133,11 @@ async function handleMessage(req, res) {
   } catch (error) {
     const latencyMs = timer.elapsedMs();
     logger.error('Error handling webhook message', error, { latency_ms: latencyMs });
+    
+    // Ensure response was sent (should already be sent, but double-check)
+    if (!res.headersSent) {
+      res.status(200).send('OK');
+    }
     
     // Try to send error message to user if we have sender info
     try {
