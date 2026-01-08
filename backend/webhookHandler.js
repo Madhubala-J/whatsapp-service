@@ -5,6 +5,7 @@ const messageNormalizer = require('../services/message-normalization-service/nor
 const { createLogger, createTimer } = require('../services/logging-service/logger');
 const { verifySignature } = require('./middleware/signatureValidator');
 const { processWithIdempotency } = require('../services/idempotency-service/idempotencyService');
+const { formatForWhatsApp } = require('../services/utils/whatsappFormatter');
 
 const { WHATSAPP_MESSAGE_MAX_LENGTH } = whatsappService;
 
@@ -177,9 +178,15 @@ async function processMessage(message, value, logger) {
     message_length: messageText.length,
   });
 
-  // Skip non-text messages for now
-  if (!messageText) {
-    logger.debug('Ignoring non-text message', { message_id: messageId, type: message.type });
+  // Strict validation: Only process text messages with valid text body
+  // Ensure message type is "text" and message.text.body exists
+  if (message.type !== 'text' || !message.text || !messageText || messageText.trim().length === 0) {
+    logger.debug('Ignoring non-text or empty message', { 
+      message_id: messageId, 
+      type: message.type,
+      has_text: !!message.text,
+      has_body: !!messageText
+    });
     return;
   }
 
@@ -193,14 +200,24 @@ async function processMessage(message, value, logger) {
     });
 
     // Parse message type (greeting vs query)
+    // Only parse if we have a valid text message
     const parsed = messageParser.parse(messageText);
 
+    // Send greeting ONLY if explicitly detected as greeting
     if (parsed.type === 'greeting') {
       // Send help message
       const helpText = 'Hello! Send me any question and I will search HaiIndexer for the answer.';
       await whatsappService.sendTextMessage(senderPhone, helpText);
       logger.info('Sent greeting response', { sender_phone: senderPhone });
     } else {
+      // Send wait message before querying HaiIndexer
+      try {
+        await whatsappService.sendTextMessage(senderPhone, 'Haiindexer is thinking...');
+      } catch (waitMessageError) {
+        // Log but don't block if wait message fails
+        logger.warn('Failed to send wait message', waitMessageError, { sender_phone: senderPhone });
+      }
+      
       // Forward normalized query to HaiIndexer
       const apiTimer = createTimer();
       logger.apiRequest('HaiIndexer', 'POST', '/api/ui/query', {
@@ -219,8 +236,11 @@ async function processMessage(message, value, logger) {
       // Send response back to user (with message splitting if enabled)
       const responseText = response.answer || '';
       
+      // Format response for WhatsApp safety
+      const formattedResponse = formatForWhatsApp(responseText);
+      
       // Use message splitting instead of truncation
-      await whatsappService.sendTextMessageWithSplitting(senderPhone, responseText);
+      await whatsappService.sendTextMessageWithSplitting(senderPhone, formattedResponse);
       
       logger.info('Sent HaiIndexer response to user', {
         sender_phone: senderPhone,

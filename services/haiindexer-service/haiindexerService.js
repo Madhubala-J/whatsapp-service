@@ -22,6 +22,138 @@ const CIRCUIT_BREAKER_CONFIG = {
 // Create circuit breaker instance for HaiIndexer
 const circuitBreaker = createCircuitBreaker('HaiIndexer', CIRCUIT_BREAKER_CONFIG);
 
+// In-memory token cache (module-level variables)
+let cachedToken = null;
+let cachedTokenFetchedAt = null;
+
+// Token cache TTL: 30 minutes in milliseconds
+const TOKEN_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Get HaiIndexer bearer token from cache or fetch from test-token endpoint
+ * @returns {Promise<string|null>} Bearer token or null on failure
+ */
+async function getHaiIndexerBearerToken() {
+  // Check if cached token exists and is less than 30 minutes old
+  const now = Date.now();
+  if (cachedToken && cachedTokenFetchedAt && (now - cachedTokenFetchedAt) < TOKEN_CACHE_TTL_MS) {
+    return cachedToken;
+  }
+
+  // Need to fetch new token
+  if (!HAIINDEXER_API_URL) {
+    return null;
+  }
+
+  try {
+    // Construct test-token endpoint URL
+    let testTokenUrl = HAIINDEXER_API_URL;
+    // Remove trailing slash and any existing path
+    testTokenUrl = testTokenUrl.replace(/\/$/, '');
+    // Remove /api/ui/query if present to get base URL
+    testTokenUrl = testTokenUrl.replace(/\/api\/ui\/query$/, '');
+    // Append test-token endpoint
+    testTokenUrl = testTokenUrl + '/api/ui/auth/test-token';
+
+    // Log the URL being used for debugging
+    try {
+      const { createLogger } = require('../logging-service/logger');
+      const logger = createLogger();
+      logger.debug('Fetching HaiIndexer test token', { test_token_url: testTokenUrl });
+    } catch (loggerError) {
+      console.log('Fetching HaiIndexer test token from:', testTokenUrl);
+    }
+
+    // Fetch token with a short timeout (5 seconds)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const response = await fetch(testTokenUrl, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        throw new Error(`Failed to fetch test token: ${response.status} ${response.statusText}. Response: ${errorBody}`);
+      }
+
+      // Handle both JSON and plain text responses
+      const contentType = response.headers.get('content-type') || '';
+      let token = null;
+      
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        // Extract token from JSON response (handle different possible formats)
+        token = data.token || data.access_token || data.jwt || data;
+        
+        // Log the response structure for debugging
+        try {
+          const { createLogger } = require('../logging-service/logger');
+          const logger = createLogger();
+          logger.debug('HaiIndexer test token response', { 
+            has_token: !!data.token,
+            has_access_token: !!data.access_token,
+            has_jwt: !!data.jwt,
+            response_keys: Object.keys(data)
+          });
+        } catch (loggerError) {
+          console.log('Token response keys:', Object.keys(data));
+        }
+      } else {
+        // Plain text response - token is the response body
+        token = await response.text();
+      }
+      
+      // Validate token is a non-empty string
+      if (!token || typeof token !== 'string' || token.trim().length === 0) {
+        throw new Error('Token not found in test-token response. Response type: ' + contentType);
+      }
+      
+      token = token.trim();
+
+      // Cache the token
+      cachedToken = token;
+      cachedTokenFetchedAt = now;
+
+      // Log success (without logging token value)
+      try {
+        const { createLogger } = require('../logging-service/logger');
+        const logger = createLogger();
+        logger.info('Fetched new HaiIndexer test token', { token_length: token.length });
+      } catch (loggerError) {
+        console.log('Fetched new HaiIndexer test token (length:', token.length, ')');
+      }
+
+      return token;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw fetchError;
+    }
+  } catch (error) {
+    // Log error with full details but don't throw - return null to allow fallback handling
+    try {
+      const { createLogger } = require('../logging-service/logger');
+      const logger = createLogger();
+      logger.error('Failed to fetch HaiIndexer test token', error, {
+        haiindexer_api_url: HAIINDEXER_API_URL,
+        error_message: error.message,
+        error_name: error.name
+      });
+    } catch (loggerError) {
+      console.error('Failed to fetch HaiIndexer test token:', error.message);
+      console.error('HAIINDEXER_API_URL:', HAIINDEXER_API_URL);
+      if (error.stack) {
+        console.error('Stack:', error.stack);
+      }
+    }
+    return null;
+  }
+}
+
 /**
  * Query HaiIndexer API with a normalized query object
  * @param {object} normalizedQuery - Normalized query object with user_id, channel, message, timestamp, metadata
@@ -45,23 +177,22 @@ async function queryHaiIndexer(normalizedQuery) {
       'Content-Type': 'application/json',
     };
     
-    // Add Authorization header if token is configured
-    const apiToken = process.env.HAIINDEXER_API_TOKEN;
+    // Fetch bearer token automatically (dev-only test token)
+    const apiToken = await getHaiIndexerBearerToken();
     if (apiToken) {
       headers['Authorization'] = `Bearer ${apiToken}`;
-    } else {
-      // Log warning but don't crash
-      try {
-        const { createLogger } = require('../logging-service/logger');
-        const logger = createLogger();
-        logger.warn('HAIINDEXER_API_TOKEN is not set - requests will be sent without authentication');
-      } catch (loggerError) {
-        console.warn('WARNING: HAIINDEXER_API_TOKEN is not set - requests will be sent without authentication');
-      }
     }
+    // If token fetch fails, continue without auth header (existing fallback behavior)
 
-    // Prepare request body with conversation_id
+    // Prepare request body - HaiIndexer expects 'query' field instead of 'message'
     const requestBody = { ...normalizedQuery };
+    
+    // Map 'message' to 'query' as HaiIndexer API expects 'query' field
+    if (requestBody.message && !requestBody.query) {
+      requestBody.query = requestBody.message;
+      // Optionally keep message for backward compatibility, or remove it
+      // delete requestBody.message;
+    }
     
     // Derive conversation_id from WhatsApp sender ID
     const waId = normalizedQuery.metadata?.wa_id || normalizedQuery.metadata?.phone_number;
@@ -84,7 +215,22 @@ async function queryHaiIndexer(normalizedQuery) {
     );
 
     if (!response.ok) {
-      throw new Error(`HaiIndexer API error: ${response.status} ${response.statusText}`);
+      // Try to get error details from response body
+      let errorDetails = response.statusText;
+      try {
+        const errorBody = await response.text();
+        if (errorBody) {
+          try {
+            const parsedError = JSON.parse(errorBody);
+            errorDetails = JSON.stringify(parsedError, null, 2);
+          } catch {
+            errorDetails = errorBody;
+          }
+        }
+      } catch (e) {
+        // Ignore errors when reading error body
+      }
+      throw new Error(`HaiIndexer API error: ${response.status} ${response.statusText}\n${errorDetails}`);
     }
 
     const data = await response.json();

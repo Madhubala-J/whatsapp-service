@@ -6,9 +6,8 @@
 const GREETING_PATTERNS = [
   /^hi\s*$/i,
   /^hello\s*$/i,
-  /^help\s*$/i,
   /^hey\s*$/i,
-  /^hiya\s*$/i,
+  /^start\s*$/i,
 ];
 
 /**
