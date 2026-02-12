@@ -263,14 +263,7 @@ async function processMessage(message, value, logger) {
       await whatsappService.sendTextMessage(senderPhone, helpText);
       logger.info('Sent greeting response', { sender_phone: senderPhone });
     } else {
-      // Send wait message before querying HaiIndexer
-      try {
-        await whatsappService.sendTextMessage(senderPhone, 'Haiindexer is thinking...');
-      } catch (waitMessageError) {
-        // Log but don't block if wait message fails
-        logger.warn('Failed to send wait message', waitMessageError, { sender_phone: senderPhone });
-      }
-      
+      // Directly forward the normalized query to HaiIndexer without sending a "thinking" placeholder
       // Forward normalized query to HaiIndexer
       const apiTimer = createTimer();
       logger.apiRequest('HaiIndexer', 'POST', '/api/ui/query', {

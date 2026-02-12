@@ -191,23 +191,16 @@ async function queryHaiIndexer(normalizedQuery) {
     }
     // If token is not available, continue without auth header (fallback behavior)
 
-    // Prepare request body - HaiIndexer expects 'query' field instead of 'message'
+    // Prepare request body for /api/ui/query endpoint
+    // Required fields: query, conversation_id
+    // Optional fields: tenant_id (defaults to "default"), include_trace
+    const waId = normalizedQuery.metadata?.wa_id || normalizedQuery.metadata?.phone_number;
+
     const requestBody = {
       query: normalizedQuery.message || normalizedQuery.query,
-      tenant_id: "default",
-      top_k: 5
+      conversation_id: waId ? `whatsapp-${waId}` : `whatsapp-unknown-${Date.now()}`,
+      tenant_id: "default"
     };
-
-    // Derive conversation_id from WhatsApp sender ID
-    const waId = normalizedQuery.metadata?.wa_id || normalizedQuery.metadata?.phone_number;
-    if (waId) {
-      requestBody.conversation_id = `whatsapp-${waId}`;
-    }
-
-    // Include user_id if available
-    if (normalizedQuery.user_id) {
-      requestBody.user_id = normalizedQuery.user_id;
-    }
 
     const response = await fetchWithRetry(
       apiUrl,
