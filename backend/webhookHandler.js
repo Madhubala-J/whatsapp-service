@@ -259,7 +259,7 @@ async function processMessage(message, value, logger) {
     // Send greeting ONLY if explicitly detected as greeting
     if (parsed.type === 'greeting') {
       // Send help message
-      const helpText = 'Hello! Send me any question and I will search HaiIndexer for the answer.';
+      const helpText = 'Hello! Reaching out to HaiReach? How can I assist you today?';
       await whatsappService.sendTextMessage(senderPhone, helpText);
       logger.info('Sent greeting response', { sender_phone: senderPhone });
     } else {
